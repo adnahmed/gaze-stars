@@ -9,8 +9,10 @@
 import json
 import os
 import re
-from collections import OrderedDict
+import time
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 
 class Stargazer:
@@ -23,6 +25,26 @@ class Stargazer:
         self.star_lists = []
         self.star_list_repos = {}
         self.data = {}
+        # data file (JSON Lines) for streaming large results
+        self.data_file = os.getenv("DATA_FILE", "data.jsonl")
+        # create a resilient HTTP session
+        self.session = self._make_session()
+        # whether to write consolidated JSON (disabled for large datasets)
+        self.write_consolidated = False
+
+    def _make_session(self):
+        session = requests.Session()
+        retries = Retry(
+            total=5,
+            backoff_factor=1,
+            status_forcelist=(429, 500, 502, 503, 504),
+            allowed_methods=("HEAD", "GET", "OPTIONS"),
+            raise_on_status=False,
+        )
+        adapter = HTTPAdapter(max_retries=retries)
+        session.mount("https://", adapter)
+        session.mount("http://", adapter)
+        return session
 
     def get_all_starred(self):
         url = f"https://api.github.com/users/{self.username}/starred?per_page=100"
@@ -32,39 +54,94 @@ class Stargazer:
             "X-GitHub-Api-Version": "2022-11-28",
             "User-Agent": "Stargazer",
         }
-        all_repos = {}
-        while url:
-            response = requests.get(url, headers=headers)
-            response.raise_for_status()
-            for repo in response.json():
-                all_repos[repo["full_name"]] = {
-                    "html_url": repo["html_url"],
-                    "description": repo["description"] or "",
-                    "listed": False,
-                    "stars": repo["stargazers_count"],
-                }
-            url = response.links.get("next", {}).get("url")
-        self.data = all_repos
-        with open("data.json", "w", encoding="utf-8") as f:
-            json.dump(all_repos, f, indent=4, ensure_ascii=False)
-        return all_repos
+        # Stream results to a JSON Lines file to avoid keeping everything in memory
+        with open(self.data_file, "w", encoding="utf-8") as out_f:
+            while url:
+                response = self.session.get(url, headers=headers, timeout=10)
+                # handle rate limiting
+                self._handle_rate_limit(response)
+                response.raise_for_status()
+                page_items = response.json()
+                for repo in page_items:
+                    entry = {
+                        "full_name": repo["full_name"],
+                        "html_url": repo["html_url"],
+                        "description": repo["description"] or "",
+                        "listed": False,
+                        "stars": repo["stargazers_count"],
+                    }
+                    out_f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+                url = response.links.get("next", {}).get("url")
+
+        # optionally load data into memory for generation (disabled for huge datasets)
+        if self.write_consolidated:
+            self.load_data_from_jsonl()
+        else:
+            # keep minimal in-memory index empty until explicitly loaded
+            self.data = {}
+        return None
+
+    def load_data_from_jsonl(self):
+        """Load data from the JSON Lines file into self.data (full_name -> metadata)."""
+        data = {}
+        try:
+            with open(self.data_file, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        obj = json.loads(line)
+                        full = obj.get("full_name")
+                        if full:
+                            data[full] = {
+                                "html_url": obj.get("html_url", ""),
+                                "description": obj.get("description", ""),
+                                "listed": obj.get("listed", False),
+                                "stars": obj.get("stars", 0),
+                            }
+                    except json.JSONDecodeError:
+                        continue
+        except FileNotFoundError:
+            self.data = {}
+            return
+        self.data = data
+
+    def _handle_rate_limit(self, response):
+        # If GitHub signals rate limit reached, sleep until reset
+        headers = response.headers
+        remaining = headers.get("X-RateLimit-Remaining")
+        reset = headers.get("X-RateLimit-Reset")
+        if remaining is not None and reset is not None:
+            try:
+                if int(remaining) == 0:
+                    reset_ts = int(reset)
+                    sleep_for = max(0, reset_ts - int(time.time()) + 5)
+                    time.sleep(sleep_for)
+            except ValueError:
+                pass
 
     def get_lists(self):
         url = f"https://github.com/{self.username}?tab=stars"
-        response = requests.get(url)
+        response = self.session.get(url, timeout=10)
         pattern = f'href="/stars/{self.username}/lists/(\S+)".*?<h3 class="f4 text-bold no-wrap mr-3">(.*?)</h3>'
         match = re.findall(pattern, response.text, re.DOTALL)
         self.star_lists = [(url, name.strip()) for url, name in match]
         return self.star_lists
 
     def get_list_repos(self, list_name):
-        url = "https://github.com/stars/{username}/lists/{list_name}?page={page}"
+        page_url_template = (
+            "https://github.com/stars/{username}/lists/{list_name}?page={page}"
+        )
         page = 1
+        # ensure key exists so we always return a list (avoid KeyError if page has no matches)
+        if list_name not in self.star_list_repos:
+            self.star_list_repos[list_name] = []
         while True:
-            current_url = url.format(
+            current_url = page_url_template.format(
                 username=self.username, list_name=list_name, page=page
             )
-            response = requests.get(current_url)
+            response = self.session.get(current_url, timeout=10)
             pattern = r'<h3>\s*<a href="[^"]*">\s*<span class="text-normal">(\S+) / </span>(\S+)\s+</a>\s*</h3>'
             match = re.findall(pattern, response.text)
             if not match:
@@ -73,7 +150,7 @@ class Stargazer:
                 self.star_list_repos[list_name] = []
             self.star_list_repos[list_name].extend(match)
             page += 1
-        return self.star_list_repos[list_name]
+        return self.star_list_repos.get(list_name, [])
 
     def get_all_repos(self):
         for list_url, _ in self.star_lists:
@@ -168,7 +245,9 @@ class Stargazer:
 
 if __name__ == "__main__":
     stargazer = Stargazer()
-    stargazer.get_all_starred()  # 获取所有starred仓库
-    stargazer.get_lists()  # 获取分类列表
-    stargazer.get_all_repos()  # 获取每个分类的仓库
-    stargazer.generate_readme()  # 生成README
+    stargazer.get_all_starred()  # fetch all starred repositories (streamed to data.jsonl)
+    stargazer.get_lists()  # fetch star lists (categories)
+    stargazer.get_all_repos()  # fetch repositories in each category
+    # load data into memory from JSONL for README generation
+    stargazer.load_data_from_jsonl()
+    stargazer.generate_readme()  # generate README
