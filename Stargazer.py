@@ -82,10 +82,10 @@ class Stargazer:
 
     def generate_readme(self):
         sections = [name for _, name in self.star_lists]
-        sections.append("未分类仓库")
+        sections.append("Uncategorized Repositories")
         text = ""
 
-        # 生成分类表格
+        # Generate category tables
         for list_url, list_name in self.star_lists:
             # 获取当前分类仓库并按stars降序
             repos = [
@@ -101,7 +101,7 @@ class Stargazer:
                 sorted_repos = repos[::-1]
             # 生成表格内容
             text += f"## {list_name}\n\n"
-            text += "| 仓库名称 | 描述 | Star数 |\n"
+            text += "| Repository | Description | Stars |\n"
             text += "|----------|------|-------|\n"
             for key, repo in sorted_repos:
                 repo["listed"] = True
@@ -120,12 +120,12 @@ class Stargazer:
             unlisted = [key for key in self.data if not self.data[key]["listed"]]
             unlisted = unlisted[::-1]
 
-        text += "## 未分类仓库\n\n"
-        text += "| 仓库名称 | 描述 | Star数 |\n"
+        text += "## Uncategorized Repositories\n\n"
+        text += "| Repository | Description | Stars |\n"
         text += "|----------|------|-------|\n"
 
         if not unlisted:
-            text += "| *所有仓库均已分类* | | |\n"
+            text += "| *All repositories are categorized* | | |\n"
         else:
             for k in unlisted:
                 desc = self.data[k]["description"].replace("|", "\\|")
@@ -137,7 +137,7 @@ class Stargazer:
         if toc:
             text = f"{toc}{text}"
 
-        # 生成完整README
+        # Generate full README
         with open(self.template, "r", encoding="utf-8") as f:
             template = f.read()
 
