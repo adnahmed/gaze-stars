@@ -158,9 +158,8 @@ class Stargazer:
         return self.star_list_repos
 
     def generate_readme(self):
-        sections = [name for _, name in self.star_lists]
-        sections.append("Uncategorized Repositories")
         text = ""
+        category_counts = {}
 
         # Generate category tables
         for list_url, list_name in self.star_lists:
@@ -170,6 +169,7 @@ class Stargazer:
                 for user, repo in self.star_list_repos.get(list_url, [])
                 if f"{user}/{repo}" in self.data
             ]
+            category_counts[list_name] = len(repos)
             # sorted_repos = sorted(repos, key=lambda x: x[1]["stars"], reverse=True)
             if self.sort_by == "stars":
                 sorted_repos = sorted(repos, key=lambda x: x[1]["stars"], reverse=True)
@@ -210,7 +210,13 @@ class Stargazer:
 
         text += "\n"
 
-        toc = self.build_toc(sections)
+        sections_with_counts = [
+            (list_name, category_counts.get(list_name, 0))
+            for _, list_name in self.star_lists
+        ]
+        sections_with_counts.append(("Uncategorized Repositories", len(unlisted)))
+
+        toc = self.build_toc(sections_with_counts)
         if toc:
             text = f"{toc}{text}"
 
@@ -221,18 +227,19 @@ class Stargazer:
         with open(self.output, "w", encoding="utf-8") as f:
             f.write(template.replace("[[GENERATE HERE]]", text.strip()))
 
-    def build_toc(self, sections):
-        cleaned_sections = [section for section in sections if section]
+    def build_toc(self, sections_with_counts):
+        cleaned_sections = [(s, c) for s, c in sections_with_counts if s]
         if not cleaned_sections:
             return ""
         anchors = {}
         toc_lines = ["## TOC", ""]
-        for section in cleaned_sections:
+        for section, count in cleaned_sections:
             slug = self.slugify(section)
-            count = anchors.get(slug, 0)
-            unique_slug = slug if count == 0 else f"{slug}-{count}"
-            anchors[slug] = count + 1
-            toc_lines.append(f"- [{section}](#{unique_slug})")
+            seen = anchors.get(slug, 0)
+            unique_slug = slug if seen == 0 else f"{slug}-{seen}"
+            anchors[slug] = seen + 1
+            label = f"{section} ({count})"
+            toc_lines.append(f"- [{label}](#{unique_slug})")
         toc_lines.append("")
         return "\n".join(toc_lines)
 
