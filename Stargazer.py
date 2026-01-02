@@ -138,10 +138,10 @@ class Stargazer:
             text = f"{toc}{text}"
 
         # 生成完整README
-        with open(self.template, "r") as f:
+        with open(self.template, "r", encoding="utf-8") as f:
             template = f.read()
 
-        with open(self.output, "w") as f:
+        with open(self.output, "w", encoding="utf-8") as f:
             f.write(template.replace("[[GENERATE HERE]]", text.strip()))
 
     def build_toc(self, sections):
